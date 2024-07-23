@@ -4,6 +4,25 @@
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC Documentation
+# MAGIC https://www.datafiles.samhsa.gov/sites/default/files/field-uploads-protected/studies/MH-CLD-2021/MH-CLD-2021-datasets/MH-CLD-2021-DS0001/MH-CLD-2021-DS0001-info/MH-CLD-2021-DS0001-info-codebook.pdf
+# MAGIC
+# MAGIC
+# MAGIC Dataset
+# MAGIC https://www.google.com/url?sa=D&q=https://www.datafiles.samhsa.gov/sites/default/files/field-uploads-protected/studies/MH-CLD-2021/MH-CLD-2021-datasets/MH-CLD-2021-DS0001/MH-CLD-2021-DS0001-bundles-with-study-info/MH-CLD-2021-DS0001-bndl-data-csv_v1.zip&ust=1721825520000000&usg=AOvVaw0IPzUCKetW6vLY7z8GzTT_&hl=en&source=gmail
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Initial configuration and logging settings..
+# MAGIC
+# MAGIC Logging here would have more locations if needed depending on the reporting needs and analysis tools. 
+# MAGIC Ideally it is connected to a logging service like datadog or splunk that allows for indept log dashboard creation
+# MAGIC and reporting/alerting metrics
+
+# COMMAND ----------
+
 
 import logging
 
@@ -47,12 +66,17 @@ logger.error("TEST ERROR LOG:::")
 # MAGIC %md
 # MAGIC Use the Shell option of databricks is an easy to to quickly access some built in functionality, it could be done in python as a code block buy shell commands are better suited.
 # MAGIC
-# MAGIC Idealling this would goto Volumes, but its not available in this version of databricks
+# MAGIC Later as we process the file it will target to a Volume.
 
 # COMMAND ----------
 
 # MAGIC %sh
 # MAGIC wget https://www.datafiles.samhsa.gov/sites/default/files/field-uploads-protected/studies/MH-CLD-2021/MH-CLD-2021-datasets/MH-CLD-2021-DS0001/MH-CLD-2021-DS0001-bundles-with-study-info/MH-CLD-2021-DS0001-bndl-data-csv_v1.zip -O /tmp/data.zip
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Create the root table path in the catalogue if it doesn't exist.
 
 # COMMAND ----------
 
@@ -62,8 +86,18 @@ spark.sql(f"CREATE DATABASE IF NOT EXISTS {root_table_path}")
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC Create the main volume to be used to hold our files under our root catalogue
+
+# COMMAND ----------
+
 print(volume_data)
 spark.sql(f"CREATE VOLUME IF NOT EXISTS {root_table_path}.{volume_data}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC When creating the volume, our compute lost the mount temporarily. By unmounting all mountpoints, the system refreshed the mounts and corrected the issue allowing us to continue forward with the Volume usage.
 
 # COMMAND ----------
 
@@ -82,6 +116,11 @@ dbutils.fs.mounts()
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC Here we unzip and store the CSV file for the data, it is unzipped directly onto the volume and then we use the terminal "head" command to preview the beginning of the file, looking mainly for the header and a small sampling of the data. This ensures our file is intact and how we might ingest it later on into pyspark.
+
+# COMMAND ----------
+
 # MAGIC %sh
 # MAGIC pwd
 # MAGIC rm -f /Volumes/evaluation/mentalhealth/evaluation_data/mhcld_puf_2021.csv
@@ -89,6 +128,13 @@ dbutils.fs.mounts()
 # MAGIC head /Volumes/evaluation/mentalhealth/evaluation_data/mhcld_puf_2021.csv -n 5
 # MAGIC ls /Volumes/evaluation/mentalhealth/evaluation_data/
 # MAGIC pwd
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC To ensure our data has the correct schema, we build our discrete pyspark schema structure. When creating the Dataframe the schema is applied.
+# MAGIC
+# MAGIC we could also have defaulted everything to string and then cast later on if we needed to data wrangle in different ways
 
 # COMMAND ----------
 
@@ -143,9 +189,21 @@ schema_dataset = StructType(
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC Drop our bronze table if it exists
+
+# COMMAND ----------
+
 # Drop the table if it exist, otherwise the write will fail with a "table already exists" error
 spark.sql(f"DROP TABLE {root_table_path}.mhcld_bronze")
 
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Convert our CSV file in our volume to our pyspark dataframe, we don't infer the schema because we have defined it discretely. 
+# MAGIC
+# MAGIC We write the bronze table here as part of the Medallion structure as the raw untouched data.
 
 # COMMAND ----------
 
@@ -187,8 +245,18 @@ df_raw.printSchema()
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC Refetch the bronze data for further processing
+
+# COMMAND ----------
+
 
 df_bronze = spark.sql(f"SELECT * FROM {root_table_path}.mhcld_bronze")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Define our function that is used to compare 2 lists for content matching, this doesn't not validate order of the lists but the content of the 2 lists. Used to validate our column structure
 
 # COMMAND ----------
 
@@ -204,8 +272,14 @@ def validate_lists(list1, list2)->bool:
         return True
     else:
         print("ERROR, COLUMNS ARE DISCONCORDANT")
-        return False
+        # return Falsen - see bug note below on this fix
+        raise ValueError("Columns Do Not Match")
 
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC We process the head of the CSV separately as the CSV is the ultimate source of truth for the data provided. We will use this to compare the header in the CSV file with the list of headers from our bronze table to confirm integrity.
 
 # COMMAND ----------
 
@@ -217,6 +291,13 @@ with open(file_path,"r") as fs:
     print("Number of Columns::", len(expected_columns))
     print(expected_columns)
 
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Compare the csv header list with the bronze table column list to ensure, raising the error  where appropriatly .
+# MAGIC
+# MAGIC there is a bug here, in our validate_lists function we should be raising a validation error rather than returning False
 
 # COMMAND ----------
 
@@ -237,6 +318,13 @@ print(f"Number of Rows in dataset {df_bronze.count()}")
 
 # MAGIC %md
 # MAGIC ##### Preform data wrangling in preparation for Silver Layer table creation
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Categorical codex processing, we generate a looking dataframe that we built from the provided documentation. This will be used to join to the bronze data to translate the code values to the correct labeled permissible value.
+# MAGIC
+# MAGIC This is the most efficient method due to the fact we leverage the native pyspark join functionality and can be used across large datasets.
 
 # COMMAND ----------
 
@@ -293,6 +381,11 @@ logger.info(f"created df_codify:::{df_codify.count()}")
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC We get a distinct column list that will then be used to process our joins later on
+
+# COMMAND ----------
+
 from pyspark.sql.functions import col
 
 df_codify_columns = df_codify.select(col("COLUMN")).distinct()
@@ -302,10 +395,26 @@ logger.info(f"created codify_columns:::")
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC This was simply used for some data exploration during development
+
+# COMMAND ----------
+
 # MAGIC %sql
 # MAGIC -- Write the JOIN in SQL format to understand how it works
 # MAGIC -- SELECT s.*, label as EMPOLY_LABEL from df_raw_copy as s
 # MAGIC -- LEFT JOIN df_codify ON df_codify.VALUE = s.EMPLOY and df_codify.COLUMN = 'EMPLOY'
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Using the codex table created earlier we process each column to be translated, joining it to the bronze data with the translated permissible value placed into a new column called COLUMN_LABEL.
+# MAGIC
+# MAGIC We also utilize our validate_list functinality to ensure the column list is updated as expected. 
+# MAGIC
+# MAGIC During the processing we output hte frequency table that easily allows us to see any misjoins or mistakes using our groupby,count method
+# MAGIC
+# MAGIC If time was permitted at this point we could write a validate function as well which would looking for misjoins by looking for codes or values that occur with multiple codes/labels.
 
 # COMMAND ----------
 
@@ -325,6 +434,13 @@ for c in ls_codify_columns:
 display(df_codes)
 new_column_list = list(df_codes.columns)
 valid_new_list = validate_lists(new_column_list, updated_expected_columns)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Casting values from one type to we utilize the withColumn and the cast(DataType) method.
+# MAGIC
+# MAGIC In hind site, it probably would have been better practice to generate a new column and then compare values prior replacing the old set of data.
 
 # COMMAND ----------
 
@@ -348,6 +464,26 @@ df_cast.printSchema()
 
 # Displays summary statistics for the casted dataframe
 display(df_cast.summary())
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Normalizing data with a new min-max value.   
+# MAGIC
+# MAGIC using our normalize_with_mapping function we generate a mapping between old values and new values.
+# MAGIC
+# MAGIC The new values are based on a new minimum and new maximum that can be defined at the function call. 
+# MAGIC
+# MAGIC The function will assign a new value based on the scale between the new minimum and new maximum.
+# MAGIC
+# MAGIC for example if there are 4 values and our new min/max is 0 - 1.. each value will be represented by a 0.33 increment (0 and 1 are included)
+# MAGIC
+# MAGIC example
+# MAGIC
+# MAGIC values {2, 5, 10, 23}
+# MAGIC new values {2:0, 5:0.33 10:0.66, 23: 1}
+# MAGIC
+# MAGIC We use this value mapping and the pyspark join functionality to normalize the old values ot the new values. New columns are created for this normalized MM data
 
 # COMMAND ----------
 
@@ -380,7 +516,7 @@ def normalize_with_mapping(val_list, new_min, new_max):
 
 try:
     # Sample data 
-    min_max_columns = ['MH1','MH2','Mh3']
+    min_max_columns = ['MH1','MH2','MH3']
     df_norm = df_cast
     for mm in min_max_columns: 
         df_filter = df_norm.select(col(mm)).distinct().filter(df_norm[mm] >= 0) 
@@ -399,6 +535,15 @@ except Exception as e:
     raise ValueError(f"normalize_with_mapping failed with error: {e}")
 
 display(df_norm)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Normalizing with the Z-score is similar in that we first will generate our mapping from the val_list and calculate the mean and standard deviation of the value set.
+# MAGIC
+# MAGIC the closer to the mean, the closer to 0 the new value will be. Similar to the minmax, we utilize the mapping and join functionality to create new columns for our Z-score normalized data.
+# MAGIC
+# MAGIC ### This was fixed to go from the minmax instead of the categorical code data
 
 # COMMAND ----------
 
@@ -427,7 +572,7 @@ def normalize_with_z_score(val_list):
     return mapping
 
 try:
-    zscore_columns = ['MH1','MH2','MH3']
+    zscore_columns = ['MH1_MM','MH2_MM','MH3_MM']
     df_z1 = df_norm
     for mm in min_max_columns: 
         df_filter = df_z1.select(col(mm)).distinct().filter(df_cast[mm] >= 0) # -9 is not a valid for this normalization option so we are going to ignore that
@@ -448,6 +593,19 @@ display(df_z1)
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC Stratifying the data new into test and train sets is a key part of AIML work. Here we split the data attempting to maintain our currently distribution from the overall dataset into our Train, Test, Validate sets.
+# MAGIC
+# MAGIC TO do this we create a stratify looking column that is a concatenation of the demographic columns we are interested in mainting.
+# MAGIC
+# MAGIC This concatenated value will act as a "key" that we can then use to stratify the data.  
+# MAGIC
+# MAGIC Because of the size and complexity, we write this keyed data to a table that is partitioned by the key, this allows us for quick lookup based on the stratified key later in the process.
+# MAGIC
+# MAGIC Note: Could have possibly used  itertools.combinations with UDF
+
+# COMMAND ----------
+
 from pyspark.sql.functions import concat_ws
 from pyspark.sql.types import StringType
 ## Create a stratify column with the columns concatenated to create a single column to stratify the data by
@@ -459,11 +617,29 @@ df_stratify.write.format("delta").mode("overwrite").partitionBy("stratify").save
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC Get all distict stratify key values, this is our working list for processing through each distinct stratification set.
+
+# COMMAND ----------
+
 
 # Get the distrinct statify codes
 distinct_values = [row['stratify'] for row in spark.sql(f"select distinct stratify from {root_table_path}.stratified").collect()]
 print(f"Number of Distinct Stratifications {len(distinct_values)}")
 
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC  The splitting of hte data is handled by the pyspark.sampleBy function. To use the sampleBy we first generate a fractions dictionary that contains the percentage of each distinct stratification key value.
+# MAGIC
+# MAGIC  Because we want an even distribution, all of the fractions will be equal to the training ratio desired (0.8). Each stratifcation will than we randomly split out as close to the 0.8 as possible. In some cases this will not be possible, especially in those rare instances where there are a small number of rows assiciated with that particular stratification.
+# MAGIC
+# MAGIC  as we generate the training dataset we will use a "left_anti" join to remove the training dataset from our overall dataset, this will leave us with our test dataset at a ratio of  1 - train_ratio, or in this case 0.2 (20%).
+# MAGIC
+# MAGIC  we use the same strategy to segment out a validation set from the training set.
+# MAGIC
+# MAGIC
 
 # COMMAND ----------
 
@@ -474,19 +650,21 @@ train_ratio = 0.8
 
 # If we requery the dataset here, it takes advantage of the partitioning
 df_strat = spark.sql(f"select * from {root_table_path}.stratified")
+
+# Get the distict stratify values and their counts
 category_distribution = df_strat.groupBy(col('stratify')).count()
 
 
 # Create a fractions dictionary for the sampleBy
 fractions = {(row['stratify']): train_ratio
                                        for row in category_distribution.collect() }
-# # Sample indices based on category distributions
+# # Sample indices based on category distributions - can only be on 1 column this is the reason we built the concatenated stratify column
 df_train_and_validate = df_strat.stat.sampleBy(
                                 'stratify',
                                 fractions=fractions,
                                 seed=42)
 
-# Create a fractions dictionary for the sampleBy
+# Create a fractions dictionary for the sampleBy for the validation dataset
 fractions_validate = {(row['stratify']): train_ratio
                                        for row in category_distribution.collect() } 
 # Resample the df_train_and_validate to get the validation set
@@ -510,6 +688,37 @@ print(f"Number of Test Records {df_test.count()}")
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC Final Distributions
+# MAGIC
+# MAGIC | Set | Totals |Percentage | 
+# MAGIC |----------|----------|----------|
+# MAGIC | Training  |2982194  | 46%   |
+# MAGIC | Validate  |  745516| 11%   | 
+# MAGIC | Test  | 2781315 | 43%   |
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Adding a column called split with the value designating the Train/Test/Validate dataset each row belongs allows us to analyze the data further within each dataset independently or as a whole.  
+# MAGIC
+# MAGIC We write this data to our silver table that includes
+# MAGIC
+# MAGIC 1) The codex translation of certain categorical fields to their Permissible Value Label
+# MAGIC 2) MinMax normalization for certain fields that are normalized from 0-1 as the new min max
+# MAGIC 3) Z-score normalization of certain fields that are normalized to their mean/std deviation with the mean represented by 0
+# MAGIC 4) Each row designated to be part of a Train/Test/Validate dataset
+# MAGIC
+# MAGIC
+# MAGIC Here we could apply several partition strategies depending on what the downstream query needs are. 
+# MAGIC
+# MAGIC Some parition columns might be "split" column, if we need easy lookup of the split sets
+# MAGIC
+# MAGIC Year/Region if we are looking to segment out based on year or region for statistics and processing
+
+# COMMAND ----------
+
 # Add the Split Group Column to stratify
 df_train = df_train.withColumn("split", lit("train"))
 df_validate = df_validate.withColumn("split", lit("validate"))
@@ -524,6 +733,11 @@ df_silver.write.format("delta").mode("overwrite").saveAsTable(f"{root_table_path
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC For convenience the split datasets are saved out, these are only for convenience with the silver table containing the complete dataset
+
+# COMMAND ----------
+
 df_train.write.format("delta").mode("overwrite").saveAsTable(f"{root_table_path}.train")
 df_validate.write.format("delta").mode("overwrite").saveAsTable(f"{root_table_path}.validate")
 df_test.write.format("delta").mode("overwrite").saveAsTable(f"{root_table_path}.test")
@@ -533,6 +747,23 @@ df_test.write.format("delta").mode("overwrite").saveAsTable(f"{root_table_path}.
 display(df_train)
 display(df_validate)
 display(df_test)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC The next few blocks are looking at the distribution of one of our demographics columns to determine how well our split/stratification worked.
+# MAGIC
+# MAGIC to summarize, our Gender distribution is (the validate table below was not originally included in teh notebook, but the numbers are provided below)
+# MAGIC
+# MAGIC ### Gender
+# MAGIC | Set | 1 | 2 | -9 |
+# MAGIC |----------|----------|----------|----------|
+# MAGIC | Overall    | 47.07%   | 52.73%   | 19.3%   |
+# MAGIC | Traing    | 45.46%   | 54.36%   | 17.0%   |
+# MAGIC | Test    | 49.6%   | 50.1%   | 23%   |
+# MAGIC | Validate    | 45.5%   | 54.3%   | 17.2%   |
+# MAGIC
+# MAGIC
 
 # COMMAND ----------
 
@@ -562,6 +793,23 @@ category_counts_with_percentage.show()
 
 # COMMAND ----------
 
+
+from pyspark.sql.functions import col
+
+df_val = spark.sql(f"SELECT * FROM {root_table_path}.validate")
+total_count = df_val.count()
+
+# Calculate count for each distinct value
+category_counts = df_val.groupBy('GENDER').count()
+
+# Calculate percentage for each value
+category_counts_with_percentage = category_counts.withColumn('percentage', col('count') * 100 / total_count)
+
+# Show the result
+category_counts_with_percentage.show()
+
+# COMMAND ----------
+
 total_count = df_test.count()
 
 # Calculate count for each distinct value
@@ -572,6 +820,11 @@ category_counts_with_percentage = category_counts.withColumn('percentage', col('
 
 # Show the result
 category_counts_with_percentage.show()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Write out the final gold dataset
 
 # COMMAND ----------
 
